@@ -1,18 +1,7 @@
 /*
- * Copyright © 2008-2010 Stéphane Raimbault <stephane.raimbault@gmail.com>
+ * Copyright © 2008-2014 Stéphane Raimbault <stephane.raimbault@gmail.com>
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include <stdio.h>
@@ -25,6 +14,11 @@
 # include <winsock2.h>
 #else
 # include <sys/socket.h>
+#endif
+
+/* For MinGW */
+#ifndef MSG_NOSIGNAL
+# define MSG_NOSIGNAL 0
 #endif
 
 #include "unit-test.h"
@@ -77,11 +71,11 @@ int main(int argc, char*argv[])
 
     modbus_set_debug(ctx, TRUE);
 
-    mb_mapping = modbus_mapping_new(
-        UT_BITS_ADDRESS + UT_BITS_NB,
-        UT_INPUT_BITS_ADDRESS + UT_INPUT_BITS_NB,
-        UT_REGISTERS_ADDRESS + UT_REGISTERS_NB,
-        UT_INPUT_REGISTERS_ADDRESS + UT_INPUT_REGISTERS_NB);
+    mb_mapping = modbus_mapping_new_start_address(
+        UT_BITS_ADDRESS, UT_BITS_NB,
+        UT_INPUT_BITS_ADDRESS, UT_INPUT_BITS_NB,
+        UT_REGISTERS_ADDRESS, UT_REGISTERS_NB_MAX,
+        UT_INPUT_REGISTERS_ADDRESS, UT_INPUT_REGISTERS_NB);
     if (mb_mapping == NULL) {
         fprintf(stderr, "Failed to allocate the mapping: %s\n",
                 modbus_strerror(errno));
@@ -89,43 +83,16 @@ int main(int argc, char*argv[])
         return -1;
     }
 
-    /* Unit tests of modbus_mapping_new (tests would not be sufficient if two nb_* were identical) */
-    if (mb_mapping->nb_bits != UT_BITS_ADDRESS + UT_BITS_NB) {
-        printf("Invalid nb bits (%d != %d)\n", UT_BITS_ADDRESS + UT_BITS_NB, mb_mapping->nb_bits);
-        modbus_free(ctx);
-        return -1;
-    }
-
-    if (mb_mapping->nb_input_bits != UT_INPUT_BITS_ADDRESS + UT_INPUT_BITS_NB) {
-        printf("Invalid nb input bits: %d\n", UT_INPUT_BITS_ADDRESS + UT_INPUT_BITS_NB);
-        modbus_free(ctx);
-        return -1;
-    }
-
-    if (mb_mapping->nb_registers != UT_REGISTERS_ADDRESS + UT_REGISTERS_NB) {
-        printf("Invalid nb registers: %d\n", UT_REGISTERS_ADDRESS + UT_REGISTERS_NB);
-        modbus_free(ctx);
-        return -1;
-    }
-
-    if (mb_mapping->nb_input_registers != UT_INPUT_REGISTERS_ADDRESS + UT_INPUT_REGISTERS_NB) {
-        printf("Invalid bb input registers: %d\n", UT_INPUT_REGISTERS_ADDRESS + UT_INPUT_REGISTERS_NB);
-        modbus_free(ctx);
-        return -1;
-    }
-
     /* Examples from PI_MODBUS_300.pdf.
        Only the read-only input values are assigned. */
 
-    /** INPUT STATUS **/
-    modbus_set_bits_from_bytes(mb_mapping->tab_input_bits,
-                               UT_INPUT_BITS_ADDRESS, UT_INPUT_BITS_NB,
+    /* Initialize input values that's can be only done server side. */
+    modbus_set_bits_from_bytes(mb_mapping->tab_input_bits, 0, UT_INPUT_BITS_NB,
                                UT_INPUT_BITS_TAB);
 
-    /** INPUT REGISTERS **/
+    /* Initialize values of INPUT REGISTERS */
     for (i=0; i < UT_INPUT_REGISTERS_NB; i++) {
-        mb_mapping->tab_input_registers[UT_INPUT_REGISTERS_ADDRESS+i] =
-            UT_INPUT_REGISTERS_TAB[i];;
+        mb_mapping->tab_input_registers[i] = UT_INPUT_REGISTERS_TAB[i];;
     }
 
     if (use_backend == TCP) {
@@ -149,14 +116,17 @@ int main(int argc, char*argv[])
             /* Filtered queries return 0 */
         } while (rc == 0);
 
-        if (rc == -1) {
-            /* Connection closed by the client or error */
+        /* The connection is not closed on errors which require on reply such as
+           bad CRC in RTU. */
+        if (rc == -1 && errno != EMBBADCRC) {
+            /* Quit */
             break;
         }
 
-
-        /* Read holding registers */
+        /* Special server behavior to test client */
         if (query[header_length] == 0x03) {
+            /* Read holding registers */
+
             if (MODBUS_GET_INT16_FROM_INT8(query, header_length + 3)
                 == UT_REGISTERS_NB_SPECIAL) {
                 printf("Set an incorrect number of values\n");
@@ -191,13 +161,20 @@ int main(int argc, char*argv[])
                 uint8_t req[] = "\x00\x1C\x00\x00\x00\x05\xFF\x03\x02\x00\x00";
                 int req_length = 11;
                 int w_s = modbus_get_socket(ctx);
+                if (w_s == -1) {
+                    fprintf(stderr, "Unable to get a valid socket in special test\n");
+                    continue;
+                }
 
                 /* Copy TID */
                 req[1] = query[1];
                 for (i=0; i < req_length; i++) {
                     printf("(%.2X)", req[i]);
-                    usleep(500);
-                    send(w_s, req + i, 1, MSG_NOSIGNAL);
+                    usleep(5000);
+                    rc = send(w_s, (const char*)(req + i), 1, MSG_NOSIGNAL);
+                    if (rc == -1) {
+                        break;
+                    }
                 }
                 continue;
             }
